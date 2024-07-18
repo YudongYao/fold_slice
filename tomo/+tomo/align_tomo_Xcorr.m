@@ -64,6 +64,7 @@ function [total_shift, variation, variation_aligned]  = align_tomo_Xcorr(object_
     parser.addParameter('filter_pos', 50 , @isnumeric )
     parser.addParameter('filter_data', 0.05 , @isnumeric )
     parser.addParameter('ROI', {} , @iscell )
+    parser.addParameter('usevariation', true, @islogical )
 
 
     parser.parse(varargin{:})
@@ -76,16 +77,20 @@ function [total_shift, variation, variation_aligned]  = align_tomo_Xcorr(object_
         end
     end
     
-    if isreal(object_0)
-        error('Complex object expected')
-    end
+%     if isreal(object_0)
+%         error('Complex object expected')
+%     end
     % binning to speed up the calculation, anyway we need only low
     % resolution guess 
     
     weights = par.illum_sum ./ (par.illum_sum+1e-1*max(par.illum_sum(:))); 
-    variation = tomo.block_fun(@get_variation_field, object_0,par.binning, weights(par.ROI{:}), struct('use_GPU', true, 'ROI', {par.ROI}, 'use_fp16', false));     
-    variation = real(variation);  % the real() function must be applied outside of get_variation_field to get betetr performance, it seems like a bug in matlab 
-    
+    if par.usevariation
+        variation = tomo.block_fun(@get_variation_field, object_0,par.binning, weights(par.ROI{:}), struct('use_GPU', true, 'ROI', {par.ROI}, 'use_fp16', false));     
+        variation = real(variation);  % the real() function must be applied outside of get_variation_field to get betetr performance, it seems like a bug in matlab 
+    else
+        variation = object_0;
+    end
+
     [~,ind_sort] = sort(angles);
     [~,ind_sort_inv] = sort(ind_sort);
 
