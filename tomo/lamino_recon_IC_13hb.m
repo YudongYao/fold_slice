@@ -22,8 +22,8 @@ par.tomo_id = []; % Either scan numbers or tomo_id can be given, but not both, i
 par.online_tomo = true;   % automatically run if called from externally
 
 par.verbose_level = 1; 
-% par.base_path = '/home/yudongyao/Documents/SSRF_13HB_20240506/13hb_20240506_preprocess/sample2_3_db_0.650um_500ms_10x/';
-par.base_path = 'C:\Users\yudongyao\Work\Data\13hb_20240506_preprocess\sample2_3_db_0.650um_500ms_10x\';
+par.base_path = '/home/yudongyao/Documents/SSRF_13HB_20240506/13hb_20240506_preprocess/sample2_3_db_0.650um_500ms_10x/';
+% par.base_path = 'C:\Users\yudongyao\Work\Data\13hb_20240506_preprocess\sample2_3_db_0.650um_500ms_10x\';
 
 filename = 'tomo_clean_dark.mat';
 % filename = 'tomo_cut.mat';
