@@ -92,6 +92,7 @@ function small_array = get_from_3D_projection(small_array, full_array, positions
                 utils.verbose(0, 'Recompilation of MEX functions ... ')
                 path = replace(mfilename('fullpath'), mfilename, ''); 
                 mex('-R2018a','-O', 'CFLAGS="\$CFLAGS -fopenmp"', '-O','LDFLAGS="\$LDFLAGS -fopenmp"',[path,'private/get_from_3D_projection_mex.cpp'], '-output', [path, 'private/get_from_3D_projection_mex'])
+                % mex('-R2018a','-O', 'COMPFLAGS="\$COMPFLAGS -fopenmp"', '-O',[path,'private/get_from_3D_projection_mex.cpp'], '-output', [path, 'private/get_from_3D_projection_mex'])
                 get_from_3D_projection_mex(small_array,full_array, positions_offset, indices)
             else
                rethrow(err) 

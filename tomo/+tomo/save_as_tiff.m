@@ -79,10 +79,10 @@ function save_as_tiff(rec, p, extra_string)
             image_filename_with_path = [tiff_folder_name '/' p.name_prefix '_' p.scans_string '_' ...
                 p.filter_type '_freqscl_' sprintf('%0.2f',p.freq_scale) '.tif'];
             if j == 1
-                imwrite(rec_uint16,image_filename_with_path,'tiff',...
+                imwrite(rec_uint16(:,:,j),image_filename_with_path,'tiff',...
                     'Compression',p.tiff_compression);
             else
-                imwrite(rec_uint16,image_filename_with_path,'tiff',...
+                imwrite(rec_uint16(:,:,j),image_filename_with_path,'tiff',...
                     'Compression',p.tiff_compression,'WriteMode','append');
             end
         else
@@ -92,14 +92,14 @@ function save_as_tiff(rec, p, extra_string)
     end
 
 
-    fid=fopen([tiff_folder_name '_cutoffs.txt'],'w');
-    fprintf(fid, '# low_cutoff = %e\n', cutoff(1));
-    fprintf(fid, '# high_cutoff = %e\n', cutoff(2));
-    fprintf(fid, '# factor = %e\n', p.factor);
-    fprintf(fid, '# pixel size = %e\n', p.pixel_size);
-    fprintf(fid, '# factor_edensity = %e\n', p.factor_edensity);
-    fprintf(fid, '# Conversion formula\n');
-    fprintf(fid, '# im_delta_from_tiff = im_tiff*(high_cutoff-low_cutoff)/(2^16-1) + low_cutoff;\n');
-    fprintf(fid, '# im_edensity_from_tiff = im_delta_from_tiff*factor_edensity;\n');
-    fclose(fid);
+    % fid=fopen([tiff_folder_name '_cutoffs.txt'],'w');
+    % fprintf(fid, '# low_cutoff = %e\n', cutoff(1));
+    % fprintf(fid, '# high_cutoff = %e\n', cutoff(2));
+    % fprintf(fid, '# factor = %e\n', p.factor);
+    % fprintf(fid, '# pixel size = %e\n', p.pixel_size);
+    % fprintf(fid, '# factor_edensity = %e\n', p.factor_edensity);
+    % fprintf(fid, '# Conversion formula\n');
+    % fprintf(fid, '# im_delta_from_tiff = im_tiff*(high_cutoff-low_cutoff)/(2^16-1) + low_cutoff;\n');
+    % fprintf(fid, '# im_edensity_from_tiff = im_delta_from_tiff*factor_edensity;\n');
+    % fclose(fid);
 end
