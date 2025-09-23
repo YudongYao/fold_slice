@@ -1,0 +1,664 @@
+
+%% Add paths
+addpath('utils')
+addpath('tests')
+% addpath(find_base_package())
+addpath('../')
+
+import plotting.*
+import io.*
+import math.*
+
+
+% File management
+disp('Initializting parameters...')
+
+par.num_proj = 720;
+par.scanstomo = [1:1:par.num_proj];
+
+par.tomo_id = []; % Either scan numbers or tomo_id can be given, but not both, if not provided leave tomo_id=[]
+
+% verbosity and online tomo 
+par.online_tomo = true;   % automatically run if called from externally
+
+par.verbose_level = 1; 
+% par.base_path = '/home/yudongyao/Documents/SSRF_13HB_20240506/13hb_20240506_preprocess/sample2_3_db_0.650um_500ms_10x/';
+par.base_path = 'C:\Users\yudongyao\Work\Data\13hb_20240506_preprocess\sample2_3_db_0.650um_500ms_10x\';
+
+filename = 'tomo_clean_dark.mat';
+% filename = 'tomo_cut.mat';
+par.output_folder = fullfile(par.base_path,'results');
+
+par.showrecons = par.verbose_level > 1;
+
+
+% Other
+par.showsorted = true;      % sort plotted projections by angles, it has not effect on the alignment itself 
+par.windowautopos = true;
+par.save_memory = false;        % try to limit use of RAM 
+par.inplace_processing = par.save_memory; % process object_stack using inplace operations to save memory 
+par.fp16_precision     = par.save_memory; % use 16-bit precision to store the complex-valued projections 
+par.cache_stack_object = par.save_memory; % store stack_object to disk when no needed 
+
+par.GPU_list = [1];     % number of the used GPU % If you want to check usage of GPU 
+                        % > nvidia-smi
+                        % Then in matlab use  par.GPU_list = 2  for example to use the second GPU 
+par.Nworkers = min(10,feature('numcores'));  % number of workers for parfor. avoid starting too many workers
+
+
+%%%% SET TRUE FOR LAMINO AND FALSE FOR MISSING WEDGE TOMO 
+par.is_laminography = true;         % false -> standard tomography / limited angle tomography
+                                    % true = allow some specific options for laminography reconstruction, ie circular field of view ...
+% default settings for Lamni
+par.lamino_angle = 65;        % laminography angle, should be 90 for common tomo
+par.tilt_angle = 0;         % rotation of the camera around the beam direction, should be 0 for common tomo 
+par.skewness_angle = 0;        % shear of the "camera axis" , should be 0 for common tomography
+
+par.vertical_scale = 1;             % relative pixel scale between the projection and reconstruction (ie voxel size and the pixel size in projection does not need to be 1:1)
+par.horizontal_scale = 1;           % relative pixel scale between the projection and reconstruction (in if vertical_scale ~= horizontal_scale then the pixels in projection are not square)
+
+Npix_projection = [];               % expected size of the projection, it is useful to create some padding around the projections to avoid artefacts after rotation of the projections 
+
+block_fun_cfg = struct('GPU_list', par.GPU_list, 'inplace', par.inplace_processing); 
+%%% prepare preprocessing function for the projections 
+% default for LAMNI 
+object_preprocess_fun = @(x)(utils.crop_pad(utils.imshear_fft(utils.imrotate_ax_fft(x,-par.tilt_angle),-par.skewness_angle,1), Npix_projection));  % negative sign is important to keep the positive angular direction identical with ASTRA definition 
+%%% perform initial checks 
+% [par, angles_check, object] = prepare.initialize_tomo(par, par.scanstomo, true, object_preprocess_fun); 
+utils.verbose(-1,'Done \n')
+
+%% Reads reconstructions and stores them in stack_object
+utils.verbose(-1,'Loading saved projections...')
+
+datafile = [par.base_path, filename];
+
+theta = linspace(0,359.5,720);
+
+% par.pixel_size = 0.325e-6;
+par.pixel_size = 0.65e-6;
+
+par.lambda = 1.24e-9/10;
+
+projs_data = load(datafile);
+stack_object = projs_data.tomo;
+% stack_object = projs_data.a;
+
+tomo.show_projections(stack_object, theta, par, ...
+    'title', 'Full original projections before alignmnent') 
+
+utils.verbose(-1,'Done \n')
+
+% index = [1:20:720];
+% test_theta = theta(index);
+% test_object = stack_object(:,:,index);
+% tomo.show_projections(test_object, test_theta, par, ...
+%     'title', 'Full original projections before alignmnent')
+
+%%
+stack_object = exp(1j*stack_object);
+
+%%
+utils.verbose(-1,'Preparing reconstruction parameters...')
+
+[Nx,Ny,Nangles] = size(stack_object);
+total_shift = zeros(Nangles,2);
+
+par.asize = [128,128]; %probe size
+par.illum_sum = ones(Nx,Ny); %
+
+utils.verbose(-1,'Estimating ROI...')
+
+% Choose reconstructed region
+% default is take as much as possible
+reduce_fun = @max; % select the the field of view in at least one projection 
+reduced_proj = tomo.block_fun(@abs, stack_object, struct('use_GPU', false, 'reduce_fun', reduce_fun)); 
+weight_sino = gpuArray(single(reduced_proj > 0.1*max(reduced_proj(:)))); 
+weight_sino = convn(weight_sino, ones(par.asize)/(prod(par.asize)), 'same'); 
+weight_sino = gather( utils.imgaussfilt2_fft(weight_sino > 0.5, 10)); 
+if  all(all(all(weight_sino == mean(weight_sino,3))))
+    weight_sino = weight_sino(:,:,1);  % if all are the same, store only the first 
+end
+[object_ROI] = get_ROI(weight_sino>0.5);
+%seems useless
+[object_ROI_xcorr] = get_ROI(weight_sino>0.5, -0.2, 32); % Changed the second entry to optimise ROI so that it doesn't contain the noise in the corners
+
+object_ROI = {intersect(ceil(1+par.asize(1)/2:Nx-par.asize(1)/2), object_ROI{1}),...
+              intersect(ceil(1+par.asize(2)/2:Ny-par.asize(2)/2), object_ROI{2})};
+                    
+par.air_gap = [];           % very roughly distance around sides where is assumed air 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Make data easily splitable for ASTRA
+width_sinogram = floor(length(object_ROI{2})/64)*64;
+Nlayers = floor(length(object_ROI{1})/64)*64;   
+Nroi = [length(object_ROI{1}),length(object_ROI{2})];
+object_ROI = {object_ROI{1}(ceil(Nroi(1)/2))+[1-Nlayers/2:Nlayers/2],...
+      object_ROI{2}(ceil(Nroi(2)/2))+[1-width_sinogram/2:width_sinogram/2]}; 
+utils.verbose(-1,'Done \n')
+
+
+% Display reconstructed phases
+par.baraxis = 'auto';       % = 'auto'  or   = [-1 1]
+par.windowautopos = true;  % automatic placemement of the plot
+par.showsorted = true;      % sort the projections by angles 
+plot_residua = false;      % if true, denote residua in projections by red circles. 
+
+tomo.show_projections(stack_object, theta, par, 'fnct', @angle, ...
+    'title', 'Full original projections before alignmnent','plot_residua', plot_residua, ...
+    'rectangle_pos', [object_ROI{2}(1), object_ROI{2}(end), object_ROI{1}(1), object_ROI{1}(end)]) 
+
+%% Manual removal of poor projections
+which_remove =  [];         % list of projection indices or bool vector of projections to be removed  
+                            % Examples: 
+                            %      which_remove = [1,5,10]
+                            %      which_remove = ismember(par.scanstomo, [264,1023])
+                            %      which_remove = theta > 0.5 & theta < 15
+                            %       
+                            %      
+plot_fnct = @angle;         % function used to preprocess the complex projections before plotting, use @(x)x to show raw projections 
+
+[stack_object,theta,total_shift,par] = tomo.remove_projections(stack_object,theta,total_shift,par, which_remove, plot_fnct, object_ROI); 
+[Nx,Ny,Nangles] = size(stack_object);
+
+%% Cross-correlation alignment of raw data - only rough guess to ease the following steps 
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Edit this section %%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+par.filter_pos = 101;        %  highpass filter on the evolution of the recovered positions applied in the following form:  X - smooth(X,par.filter_pos), it prevents accumulation of drifts in the reconstructed shifts 
+par.filter_data = 0.005;    %  highpass filter on the sinograms to avoid effects of low spatial freq. errors like phase-ramp 
+par.max_iter = 10;           %  maximal number of iterations 
+par.precision = 0.01;          %  pixels; stopping criterion
+par.binning = 16;           %  binning used to speed up the cross-correlation guess 
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+
+utils.verbose(-1,'Cross-correlation pre-alignment of raw data')
+object_ROI = {object_ROI{1}(ceil(Nroi(1)/2))+[1-Nlayers/2:Nlayers/2],...
+      object_ROI{2}(ceil(Nroi(2)/2))+[1-width_sinogram/2:width_sinogram/2]}; 
+
+% estimate smaller ROI for alignment 
+% xcorr_ROI = get_ROI(imerode(utils.Garray(par.illum_sum > 0.001), strel('disk', max(par.asize)/2))); 
+xcorr_ROI = object_ROI;
+
+[xcorr_shift, variation_binned, variation_aligned]  = tomo.align_tomo_Xcorr(stack_object, theta, par, 'ROI', xcorr_ROI,'usevariation',true);
+
+
+% show prealigned projections 
+tomo.show_projections(cat(1,variation_aligned, variation_binned), theta, par, 'title', sprintf('Preview of cross-correlation pre-aligned projections, binning %ix \n Top: original Bottom: aligned \n', par.binning), 'figure_id', 12)
+axis off image 
+
+clear variation_binned variation_aligned
+utils.verbose(-1,'Done \n')
+
+%%
+utils.verbose(-1,'Apply shifts found by cross-correlation to projections...')
+stack_object = tomo.block_fun(@utils.imshift_linear, stack_object, xcorr_shift(:,1),xcorr_shift(:,2), 'circ', block_fun_cfg);
+total_shift = total_shift + xcorr_shift;
+utils.verbose(-1,'Done \n')
+%% TOMOCONSISTENCY ALIGNMENT
+% ESTIMATE THICKNESS OF THE SAMPLE -> used to set size of the reconstructed volume 
+utils.verbose(-1,'Preparing alignment parameters...')
+sample_thickness =  500e-6; 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+definedROI{1} = []; 
+definedROI{2} = [];
+par.high_pass_filter = 0.001;        % remove effect of residuums/bad ptycho convergence , high value may get stuck in local minima 
+par.showsorted = true;              % selected angular order for alignment 
+par.valid_angles = 1:Nangles > 0;   % use only this indices to do reconstruction (with respect to the time sorted angles)
+par.center_reconstruction = false;   % keep the center of mass in center of rec. volume 
+par.align_horizontal = true;        % horizontal alignment 
+par.align_vertical = true;         % vertical alignment
+par.use_mask = false;               % apply support mask 
+par.mask_threshold = 0.001;         % []; % empty == Otsu thresholding 
+par.use_localTV = false;            % apply local TV 
+par.apply_positivity = false;        % remove negative values 
+par.min_step_size  = 0.01;          %stoppig criterion ( subpixel precision )
+par.max_iter = 500;                 % maximal number of iterations
+par.use_Xcorr_outlier_check = false; % in the first iteration check and remove outliers using Xcorr 
+par.plot_results_every = 5;        % plot results every N seconds
+
+%%% Allow here for automatic geometry refinement 
+refine_geometry = false;
+par.refine_geometry_parameters = {'shear_angle', 'tilt_angle', 'lamino_angle'};   % list of parameters to be refined : {'shear_angle', 'tilt_angle', 'lamino_angle'}
+
+%%%  Internal parameters, do not change %%%%%%%%
+par.step_relaxation = 0.3;          % gradient decent step relaxation, (1 == full step), may be needed to avoid oscilations  
+par.filter_type = 'ram-lak';        % FBP filter (ram-lak, hamming, ....)
+par.freq_scale = 1;                 % Frequency cutoff
+par.unwrap_data_method = 'none';
+% par.air_gap = [width_sinogram/4,width_sinogram/4];   % just avoid ramp from the projections 
+par.air_gap = [];   % just avoid ramp from the projections 
+% targeted center of rotation 
+param.center_of_rotation = [Nx,Ny]/2;
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%% SELECT FIELD OF VIEW FOR ALIGNMENT%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+min_proj = tomo.block_fun(@(x)min(abs(x),[],3),stack_object,struct('use_GPU', false, 'reduce_fun', @min, 'ROI', {object_ROI} )); 
+max_ang_proj = tomo.block_fun(@(x)max(angle(x),[],3),stack_object,struct('use_GPU', false, 'reduce_fun', @max, 'ROI', {object_ROI})); 
+
+f = plotting.smart_figure(2);
+clf()
+imagesc(object_ROI{2},object_ROI{1},min_proj .* max_ang_proj)
+hold on 
+axis image xy
+colormap bone
+grid on 
+hold on; plot(param.center_of_rotation(2), param.center_of_rotation(1),'or'); hold off 
+hold on; plot(mean(object_ROI{2}),mean(object_ROI{1}),'xy'); hold off 
+drawnow
+
+selected_ROI = object_ROI ;  
+
+% empirical limit for the minimal binning to avoid crashes due to low
+% memory during the alignment 
+%min_binning = max(min_binning, 2^nextpow2(ceil(sqrt((length(selected_ROI{1})*length(selected_ROI{2})*Nangles*(64)) / (utils.check_available_memory*1e6)))));
+
+% get reliability region for phase unwrapping 
+weight_sino = tomo.block_fun(@lamino.estimate_reliability_region,stack_object, par.asize, 8);
+utils.verbose(-1,'Preparing alignment parameters...done \n')
+
+%%
+utils.verbose(-1,'Generating sinogram...')
+% solve the function blockwise on GPU 
+clear sinogram  tomogram_delta 
+
+% unwrap the complex phase 
+sinogram = -tomo.unwrap2D_fft2_split(stack_object, par.air_gap ,1, weight_sino, par.GPU_list, selected_ROI);
+
+% show prealigned projections 
+tomo.show_projections(sinogram, theta, par, 'title', 'Selected region - unwrapped phase')
+utils.verbose(-1,'Generating projection...done \n')
+
+alignment_ROI = {1:length(selected_ROI{1}),1:length(selected_ROI{2})};
+
+% calculate offset of CoR for selected ROI with respect to the object_ROI range 
+CoR_offset = param.center_of_rotation(2) - ...
+            (length(alignment_ROI{2})/2 -0.5 + ... 
+                 alignment_ROI{2}(1)-1 + ...
+                   selected_ROI{2}(1)-1);
+
+% in case of laminography 
+Npix_align = ceil(0.5/cosd(par.lamino_angle-0.01)*length(alignment_ROI{2}));  % for pillar it can be the same as width_sinogram
+Npix_align = ceil([Npix_align, Npix_align, sample_thickness /par.pixel_size]/32)*32; 
+
+%%
+max_sino = tomo.block_fun(@(x)max(x,[],3),sinogram,struct('use_GPU', false, 'reduce_fun', @max, 'ROI', {alignment_ROI})); 
+
+f = plotting.smart_figure(9);
+clf()
+imagesc(alignment_ROI{2},alignment_ROI{1},max_sino)
+hold on 
+axis image xy
+colormap bone
+grid on 
+sino_size = size(sinogram); 
+hold on; plot(sino_size(2)/2, sino_size(1)/2,'or'); hold off 
+hold on; plot(mean(alignment_ROI{2}),mean(alignment_ROI{1}),'xy'); hold off 
+drawnow
+
+
+%%
+% CoR_offset_v = 60;
+% CoR_offset_offset = 137.5;
+
+% very important
+CoR_offset_v = 525;
+CoR_offset_offset = 72;
+
+shift = zeros(Nangles,2);
+par.high_pass_filter = 0.005;        % remove effect of residuums/bad ptycho convergence , high value may get stuck in local minima 
+par.align_vertical = true;           % vertical alignment, usually only a small correction of initial guess  
+par.align_horizontal = true;         % horizontal alignment, usually only a small correction of initial guess  
+par.position_update_smoothing = 0;      % avoid smoothing of the results 
+par.use_Xcorr_outlier_check = false; 
+par.step_relaxation = 0.1;
+par.max_iter = 300; 
+par.refine_geometry = false;
+par.min_step_size  = 1e-2; 
+par.momentum_acceleration = 1;
+par.plot_results_every = 5;        % plot results every N seconds
+par.show_projs = true;
+
+utils.verbose(-1,'Full alignment...');
+binning = [16,8,4,2,1];
+%binning = [2];
+
+par.GPU_list = [1];     % use more GPUs if run out of memory
+
+for jj = 1:length(binning) 
+    par.binning = binning(jj);
+    utils.verbose(-1,'Binning %i ', par.binning);
+    
+    % intermediate reconstructions and finer alignment
+    % self consitency based alignment procedure based on the ASTRA toolbox
+    [shift, par, recon, err] = tomo.align_tomo_consistency_linear(sinogram, weight_sino, theta+0.1, Npix_align, shift, par, 'selected_roi', alignment_ROI, 'CoR_offset', CoR_offset+CoR_offset_offset,'CoR_offset_v', CoR_offset_v);
+
+    % plot the estimated shifts 
+    plotting.smart_figure(25)
+    clf()
+    [~,ind_sort] = sort(theta);
+    plot(theta(ind_sort), shift(ind_sort,:), '.')
+    legend({ 'Horizontal shift', 'Vertical shift'})
+    xlabel('Angle')
+    ylabel('Shift [px]')
+    xlabel('Sorted angles')
+    title('Total shift from self-consistency alignment')
+    axis tight ; grid on 
+    drawnow
+    
+end
+utils.verbose(-1,'Full alignment...Done \n');
+
+%%
+utils.verbose(-1,'Applying shifts found by self-consistent alignment...')
+stack_object = tomo.block_fun(@utils.imshift_fft, stack_object, shift, block_fun_cfg);
+% store the total shift
+total_shift = total_shift + shift; 
+utils.verbose(-1,'Done \n')
+
+figure(99)
+plot(total_shift)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% End of alignment 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Phase ramp removal + amplitude calibration %%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+utils.verbose(-1,'Phase ramp removal + amplitude calibration...')
+Niter = 5;          % number of iterations of phase ramp refinement 
+binning = 16;      % bin data before phase ramp removal (make it faster)
+
+par.unwrap_data_method = 'fft_2D'; 
+% remove phase ramp from data to using self consistency  
+stack_object = tomo.phase_ramp_removal_tomo(stack_object,selected_ROI, theta, Npix_align*1.2, total_shift, par, 'binning', binning, 'Niter', Niter, ...
+    'positivity', false, 'auto_weighting', true,  'sino_weights', weight_sino);
+
+tomo.show_projections(stack_object, theta, par, 'fnct', @(x)angle(x(object_ROI{:},:)),  'plot_residua', false)
+utils.verbose(-1,'Done')
+
+%% Full tomogram
+par.usecircle = true;               % Use circle to mask out the corners of the tomogram
+par.filter_type = 'ram-lak';        % FBP filter (ram-lak, hamming, ....)
+par.freq_scale = 1;                 % Frequency cutoff
+rec_ind = find(par.valid_angles);   % use only some angles 
+apodize = 0;                        % axial apodization 
+radial_smooth_apodize = 175;         % smooth the apodizing function 
+%%%%%%%%%%%%%%%%%%%%%%%%%
+circulo = [];  % apodization function 
+
+utils.verbose(-1,'Finding optimal regions...')
+
+% find optimal regions from stack_object
+min_proj = tomo.block_fun(@abs, stack_object, struct('use_GPU', false, 'reduce_fun', @min)); 
+max_proj = tomo.block_fun(@abs, stack_object, struct('use_GPU', false, 'reduce_fun', @max)); 
+
+% for laminography select the region that is covered by all projections
+reconstruct_ROI = get_ROI(min_proj>0.1*max(min_proj(:)), 0, 32);
+ % 2D phase unwrapping 
+weight_sino = tomo.block_fun(@lamino.estimate_reliability_region,stack_object, par.asize, 16);
+utils.verbose(-1,'Finding optimal regions...Done')
+
+%%
+utils.verbose(-1,'Generating projections...')
+reconstruct_ROI_offset = 0;
+reconstruct_ROI2 = {reconstruct_ROI{1}(1)+reconstruct_ROI_offset:reconstruct_ROI{1}(end)-reconstruct_ROI_offset,reconstruct_ROI{2}(1)+reconstruct_ROI_offset:reconstruct_ROI{2}(end)-reconstruct_ROI_offset};
+clear sinogram 
+
+% unwrap the complex phase 
+preprocess_fun = @(x)(utils.imshear_fft(x, -par.skewness_angle,1));  % shear has to be applied before ASTRA reconstruction (block splitting does not work well with shear)
+sinogram = -tomo.unwrap2D_fft2_split(stack_object,par.air_gap,0,weight_sino, par.GPU_list, reconstruct_ROI2, preprocess_fun);
+
+Nlayers_rec = length(reconstruct_ROI2{1}); 
+Nw_rec = length(reconstruct_ROI2{2}); 
+
+% in case of laminography 
+Npix = ceil(0.5/cosd(par.lamino_angle)*Nw_rec);  % for pillar it can be the same as Nw_rec
+Npix = ceil([Npix, Npix, sample_thickness /par.pixel_size]/32)*32; 
+utils.verbose(-1,'Generating sinograms...Done')
+
+%%
+[~,ind_sort] = sort(theta); 
+ind_sort = ind_sort(ismember(ind_sort, rec_ind));
+% ind_rec = {ind_sort(1:2:end), ind_sort(2:2:end)}; 
+ind_rec = {ind_sort};
+
+
+max_sino = tomo.block_fun(@(x)max(x,[],3),sinogram,struct('use_GPU', false, 'reduce_fun', @max, 'ROI', {reconstruct_ROI})); 
+
+f = plotting.smart_figure(9);
+clf()
+imagesc(reconstruct_ROI{2},reconstruct_ROI{1},max_sino)
+hold on 
+axis image xy
+colormap bone
+grid on 
+sino_size = size(sinogram); 
+hold on; plot(Nw_rec/2, Nlayers_rec/2,'or'); hold off 
+hold on; plot(mean(reconstruct_ROI{2}),mean(reconstruct_ROI{1}),'xy'); hold off 
+drawnow
+
+
+%% 
+% CoR_offset = param.center_of_rotation(2) - ...
+%        (length(reconstruct_ROI{2})/2 -0.5 + ... 
+%             reconstruct_ROI{2}(1)-1);
+CoR_offset_v_recon = 6.5;
+CoR_offset = 13;
+% CoR_offset_v_recon=0;
+
+% remove artefacts around edges of tomogram 
+if par.usecircle
+    [~,circulo] = utils.apply_3D_apodization(ones(Npix(1:2)), apodize, 0, 200); 
+end
+
+[cfg, vectors] = astra.ASTRA_initialize(Npix,[Nlayers_rec,Nw_rec],theta,par.lamino_angle,par.tilt_angle,1, [Nlayers_rec,Nw_rec]/2 + [CoR_offset_v_recon,CoR_offset]); 
+% find optimal split of the dataset for given GPU 
+split = astra.ASTRA_find_optimal_split(cfg, length(par.GPU_list), 2, 'back');
+tic
+tomogram = tomo.FBP(sinogram, cfg, vectors, split,'valid_angles',ind_rec{1},...
+        'GPU', par.GPU_list,'filter',par.filter_type, 'filter_value',par.freq_scale,...
+        'use_derivative', false, 'mask', circulo, 'padding', 'symmetric');
+toc
+figure(131)
+plotting.imagesc_tomo(tomogram); 
+
+disp('Reconstruct tomogram...Done')
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  SART  solver - helps mainly for sparse sample (with a lot of air gaps) and in case of angularly undersampled tomograms 
+%%   - solver uses positivity constraint 
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Edit this section %%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+par.Niter_SART = 20;     % number of SART iteration 
+SART_block_size = 10;                         % size of blocks solved in parallel
+par.usecircle = true;                          % Use circle to mask out the corners of the tomogram
+relax = 0 ;                                    % SART relaxation, 0 = no relaxation
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+
+if par.Niter_SART > 0
+    if par.usecircle
+        [~,circulo] = utils.apply_3D_apodization(ones(Npix), apodize, 0, radial_smooth_apodize);
+    else
+        circulo = 1; 
+    end
+
+    utils.verbose(-1,'SART preparation',  par.Niter_SART)
+    [Ny_sino,Nx_sino,~] = size(sinogram);
+    [cfg, vectors] = astra.ASTRA_initialize(Npix,[Nlayers_rec,Nw_rec],theta,par.lamino_angle,par.tilt_angle,1, [Nlayers_rec,Nw_rec]/2 + [CoR_offset_v_recon,CoR_offset]); 
+    
+    split = astra.ASTRA_find_optimal_split(cfg, length(par.GPU_list), 1, 'both');
+    [cache_SART, cfg] = tomo.SART_prepare(cfg, vectors, SART_block_size, split);
+
+    tomogram_SART = tomogram;
+    clear err_sart 
+    for ii = 1:par.Niter_SART
+        utils.verbose(-1,'SART iter %i/%i', ii, par.Niter_SART)
+        [tomogram_SART,err_sart(ii,:)] = tomo.SART(tomogram_SART, sinogram, cfg, vectors, cache_SART, split, ...
+            'relax',relax, 'constraint', @(x)(abs(x) .* (0.9+0.1*circulo))) ; 
+        plotting.smart_figure(1111)
+        ax(1)=subplot(2,2,1);
+        plotting.imagesc3D(tomogram, 'init_frame', size(tomogram,3)/2); axis off image; colormap bone; 
+        title('Original FBP reconstruction')
+        ax(2)=subplot(2,2,2);
+        plotting.imagesc3D(tomogram_SART, 'init_frame', size(tomogram,3)/2); axis off image; colormap bone;  
+        title('Current SART reconstruction')
+        subplot(2,1,2)
+        plot(1:ii,err_sart)
+        hold all
+        plot(1:ii,median(err_sart,2),'k--', 'Linewidth',4)
+        hold off 
+        xlabel('Iteration #'); ylabel('Error'); set(gca, 'xscale', 'log'); set(gca, 'yscale', 'log')
+        grid on  
+        title('Evolution of projection-space error')
+        linkaxes(ax, 'xy')
+        plotting.suptitle('SART reconstruction')
+        drawnow
+    end
+    
+    figure
+    plotting.imagesc_tomo(tomogram_SART); 
+end
+
+% clear sinogram 
+%% %%%%%%%%%   FILL IN THE MISSING INFORMATION IN THE MISSING CONE  - TESTED ONLY ON CHIPS %%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+par.factor = 1e-3;
+tomogram_delta = tomogram*par.factor;
+% tomogram_delta = tomogram_SART*par.factor;
+delta_background = 1.2e-05;    % the lowest expected delta in the sample (ie silicon oxide in the chip)
+delta_maximal = 4.26e-5;         % the maximal extected delta -> Cu in the chip 
+TV_lambda = 1e-8;
+
+mask_relax = 0.05;              % strength of pushing the masked values to zeros -> enforce low values in close to empty regions 
+max_scale = 16; % process the reconstruction using multiscale approach, start at 0.5^max_scale
+Niter = 10; % number of iterations in each step for filling the missing cone 
+%%%%%%%%%%%%%%%%%%%%%%%%%
+
+utils.verbose(-1,'Filling missing cone')
+
+rec = tomogram_delta; 
+rec = rec - median(rec(:)); 
+rec0 = rec; 
+
+Npix = size(rec);
+
+% weakly suppress nonzero values in empty regions (along vertical axis )
+mask_vert = math.mean2(abs(rec0)); 
+mask_vert = (1-mask_relax+mask_relax*mask_vert / max(mask_vert)); 
+
+Npix_full = size(rec);
+max_block_size = [512,512]; 
+border_size = [32,32]; 
+block_size = [512,512];
+
+for scale = 2.^(log2(max_scale):-1:0)
+    utils.verbose(-1,'Running scale %i', scale)
+    if scale > 1
+        rec_small = utils.interpolateFT_3D(rec, ceil(Npix_full/scale));
+        mask_vert_small = utils.interpolateFT_3D(mask_vert, [1,1,ceil(Npix_full(3)/scale)]); 
+    else
+        rec_small = rec; 
+        mask_vert_small = mask_vert; 
+    end
+    low_freq_protection = scale < max_scale; 
+
+    blkfun_cfg = struct('Nblocks',ceil(size(rec_small,3)/512), 'GPU_list', par.GPU_list, 'verbose',0); 
+
+    % enforce "material constraint", ie force reconstruction to be positive
+    % and smaller then provided threshold (ie delta_material - delta_background)
+    %  !! due to limitations of GPU code, it has to be hardcoded value in
+    %  this function 
+
+    % apply the constraints on the missing cone region in FFT space, solve
+    % it blockwise if the object is too large 
+    tic
+    blockprocess = @(x)tomo.block_fun(@lamino.apply_lamino_constraints, x.data, mask_vert_small, par.lamino_angle, low_freq_protection, delta_maximal, delta_background, Niter, TV_lambda, blkfun_cfg); 
+    rec_regularized = blockproc(rec_small,block_size-2*border_size, blockprocess, 'BorderSize', border_size, 'DisplayWaitbar', true, 'PadMethod',  'symmetric');
+    toc
+
+    % update the reconstruction by an upscaled difference before and after
+    % the missing cone filling 
+    rec = rec + utils.interpolateFT_3D(rec_regularized - rec_small, Npix_full); %reconstruction with filled missing cone
+    clear rec_regularized rec_small 
+
+    % plot progress 
+    plotting.smart_figure(201)
+    ax(1) = subplot(2,1,1);
+    imagesc(rot90(squeeze(rec0(:,end/2,:))), [delta_background, delta_maximal]);
+    axis off image 
+    colormap bone 
+    title('Lamino reconstruction')
+    ax(2) = subplot(2,1,2);
+    imagesc(rot90(squeeze(rec(:,end/2,:))), [delta_background, delta_maximal]);
+    axis off image 
+    title('Lamino refined reconstruction')
+    drawnow 
+
+end
+
+
+% compare quality of the missing cone filling in the fourier space 
+plotting.smart_figure(202)
+ax(1)=subplot(1,2,1); 
+frec = gather(fftshift((fftn(rec0))));
+imagesc(log(1e-3+abs(rot90(squeeze(frec(:,end/2,:))))))
+axis off square 
+colormap bone 
+title('log FFT of original reconstruction')
+ax(2)=subplot(1,2,2); 
+frec = gather(fftshift((fftn(fftshift(rec)))));
+imagesc(log(1e-3+abs(rot90(squeeze(frec(:,end/2,:))))))
+axis off square 
+colormap bone 
+title('log FFT of refined reconstruction')
+drawnow 
+
+% figure(989)
+% slider_default = [.15 0.01 0.7 0.05];
+% play_default = [slider_default(1)-0.1 slider_default(2) 0.08 0.05];
+% edit_default = [slider_default(1)+slider_default(3)+0.01 slider_default(2) 0.08 0.05];
+% 
+% frec = permute(frec,[1,3,2]);
+% clearvars title_list nframes
+% for ii = 1:size(frec,3)
+%     num=ii; % frames(ii);
+%     title_list{ii} = sprintf('FFT slices: %03d', num); 
+% end
+% 
+% nframes = 1:size(frec,3);
+% imagesc3D(log(1e-3+abs(frec)), 'title_list', title_list, 'fps', 10 , 'slider_position',slider_default , ...
+%          'play_position', play_default , 'edit_position', edit_default,'fnct', @(x)x, 'order', nframes,...
+%          'init_frame', 1, 'loop', true, 'plot_residua', false)
+% colormap bone(256); 
+% axis square;
+% colorbar
+
+figure(131)
+plotting.imagesc_tomo(rec); 
+
+%clear rec rec0 frec 
+utils.verbose(-1,'Filling missing cone...Done')
+
+%% save tomogram
+par.output_folder = 'C:\Users\yudongyao\Work\Data\PyXL_recon_chip_3D\';
+par.scans_string = 'projs112_ds2';
+par.rec_delta_info = 'FBP';
+tomo.save_tomogram(rec, par, 'delta', circulo, theta, par.rec_delta_info)
+
+%% Save Tiff files for 3D visualization with external program
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Edit this section %%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+par.save_as_stack = true; 
+par.tiff_compression = 'none';
+
+par.tiff_subfolder_name = ['TIFF_delta_' par.scans_string '_' par.rec_delta_info];
+par.name_prefix = 'tomo_delta';
+%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%
+tomo.save_as_tiff(rec, par, par.rec_delta_info)
