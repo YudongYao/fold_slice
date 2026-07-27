@@ -6,38 +6,40 @@ addpath(core.find_base_package)
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% parameters %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 caller = dbstack;
 if length(caller)==1
-    % base_path = '/mnt/data2/ssrf17u/test/IC_1_large/results/';
-    base_path = '/mnt/data2/ssrf17u/test/Target_1_small_0_2s/results/';
+    base_path = '/mnt/data2/ssrf17u/test/IC_1_large/results/';
+    % base_path = '/mnt/data2/ssrf17u/test/Target_3_small_0_2s/results/';
     scan_string_format = 'scan%03d';
     output_path = base_path;
 
     scanNo = 1;
-    gpu_id = 1;
+    gpu_id = 7;
     Niter = 1000;
     
     Ndp_recon = 256;
 
-    search_previous_probe = true;
-    recon_dir_pre_probe = '/roi0_Ndp256/Mls_L1_p1_g41_Ndp128_pc200_noModel/Niter1000.mat';
+    search_previous_probe = false;
+    recon_dir_pre_probe = '/roi0_Ndp256/Mls_L1_p1_g41_Ndp256_pc200_noModel/Niter1000.mat';
 
-    use_low_res_recon = true;
-   	recon_dir_low_res = '/roi0_Ndp256/Mls_L1_p1_g41_Ndp128_pc200_noModel/Niter1000.mat';
+    use_low_res_recon = false;
+   	recon_dir_low_res = '/roi0_Ndp256/Mls_L1_p1_g41_Ndp256_pc200_noModel/Niter1000.mat';
 
     
     use_previous_probe = true;
-    use_previous_object = true;
-    use_previous_position = true;
+    use_previous_object = false;
+    use_previous_position = false;
+
+    init_recon_file = '/mnt/data2/ssrf17u/test/IC_2_large/results/scan001/roi0_Ndp256/DM_L1_p1_g41_Ndp256/Niter1000.mat';
     
     auto_center_probe = false;
     
-    extraPrintInfo = 'TP';
+    extraPrintInfo = 'chip';
     Nprobe = 1;
 
     grouping = 41;
-    method = 'Mls';
+    method = 'DM';
     momentum = 0.0;
     
-    probe_position_search_i = 200;
+    probe_position_search_i = inf;
 
     variable_probe = false;
     variable_probe_modes = 1;
@@ -68,8 +70,6 @@ delta_z = 40*1e-6;
 
 show_dp = false;
 
-% init_recon_file = 'C:\Users\yudongyao\Work\Data\ptycho_9BM\ML_recon\ptycho_recon\scan000\roi0_Ndp300\MLs_L1_p1_g21_Ndp64\Niter1000.mat';
-% init_recon_file = 'C:\Users\yudongyao\Work\Data\ptycho_9BM\ML_recon\ptycho_recon\scan000\roi0_Ndp300\MLc_L1_p10_g21_Ndp128_pc1_noModel_vp1_vi_mm\Niter1000.mat';
 
 if search_previous_probe
     foundInitialProbe = false;

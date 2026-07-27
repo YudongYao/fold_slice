@@ -1,6 +1,6 @@
 
 clear all
-path_name = 'G:\SSRF17U\IC_2_large\';
+path_name = '/mnt/data2/ssrf17u/test/Target_4_small_0_2s/';
 fnames = dir([path_name 'dp_*.mat']);
 fsorted = {fnames.name};
 for dd=1

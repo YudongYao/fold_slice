@@ -6,38 +6,41 @@ addpath(core.find_base_package)
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% parameters %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 caller = dbstack;
 if length(caller)==1
-    % base_path = '/mnt/data2/ssrf17u/test/IC_1_large/results/';
-    base_path = '/mnt/data2/ssrf17u/test/Target_1_small_0_2s/results/';
+    % base_path = '/mnt/data2/ssrf17u_20251026/IC_FIB/test_47degree/results/';
+    % base_path = '/mnt/data2/ssrf17u/test/Target_3_small_0_2s/results/';
+    base_path = '/mnt/data2/ssrf17u_20251026/test_target_stararea/test6_50nmstar/';
     scan_string_format = 'scan%03d';
     output_path = base_path;
 
     scanNo = 1;
-    gpu_id = 1;
+    gpu_id = 7;
     Niter = 1000;
     
-    Ndp_recon = 256;
+    Ndp_recon = 512;
 
-    search_previous_probe = true;
-    recon_dir_pre_probe = '/roi0_Ndp256/Mls_L1_p1_g41_Ndp128_pc200_noModel/Niter1000.mat';
+    search_previous_probe = false;
+    recon_dir_pre_probe = '/roi0_Ndp256/Mls_L1_p1_g41_Ndp256_pc200_noModel/Niter1000.mat';
 
-    use_low_res_recon = true;
-   	recon_dir_low_res = '';
+    use_low_res_recon = false;
+   	recon_dir_low_res = '/roi0_Ndp256/Mls_L1_p1_g41_Ndp256_pc200_noModel/Niter1000.mat';
 
     
-    use_previous_probe = true;
-    use_previous_object = true;
-    use_previous_position = true;
+    use_previous_probe = false;
+    use_previous_object = false;
+    use_previous_position = false;
+
+    init_recon_file = '/mnt/data2/ssrf17u/test/IC_2_large/results/scan001/roi0_Ndp256/DM_L1_p1_g41_Ndp256/Niter1000.mat';
     
     auto_center_probe = false;
     
-    extraPrintInfo = 'TP';
-    Nprobe = 1;
+    extraPrintInfo = 'chip';
+    Nprobe = 5;
 
-    grouping = 41;
+    grouping = 61;
     method = 'Mls';
     momentum = 0.0;
     
-    probe_position_search_i = 200;
+    probe_position_search_i = inf;
 
     variable_probe = false;
     variable_probe_modes = 1;
@@ -47,7 +50,7 @@ if length(caller)==1
     resultDir_extra = strcat('');
 end
 
-Ndpx = 256;  % size of cbed
+Ndpx = 512;  % size of cbed
 roi_label = strcat('0_Ndp',num2str(Ndpx));
 
 background = 0;
@@ -58,7 +61,7 @@ probe_geometry_model = {};
 
 update_pos_weight_every = inf;
 
-apply_multimodal_update = false;
+apply_multimodal_update = true;
 
 variable_intensity = false;
 
@@ -68,8 +71,6 @@ delta_z = 40*1e-6;
 
 show_dp = false;
 
-% init_recon_file = 'C:\Users\yudongyao\Work\Data\ptycho_9BM\ML_recon\ptycho_recon\scan000\roi0_Ndp300\MLs_L1_p1_g21_Ndp64\Niter1000.mat';
-% init_recon_file = 'C:\Users\yudongyao\Work\Data\ptycho_9BM\ML_recon\ptycho_recon\scan000\roi0_Ndp300\MLc_L1_p10_g21_Ndp128_pc1_noModel_vp1_vi_mm\Niter1000.mat';
 
 if search_previous_probe
     foundInitialProbe = false;
@@ -116,7 +117,7 @@ p.   prop_regime = 'farfield';                              % propagation regime
 p.   focus_to_sample_distance = [];                         % sample to focus distance, parameter to be set for nearfield ptychography, otherwise it is ignored 
 p.   FP_focal_distance = [];                                %  if nonempty -> assume Fourier ptychography configuration, FP_focal_distance = focal length of objective lens for Fourier Ptychography only,
 p.   angular_correction_setup = 'none';                         % if src_positions=='orchestra', choose angular correction for specific cSAXS experiment: 'flomni', 'omny', 'lamni', 'none', 
-p.   energy = 12.6;                                           % Energy (in keV), leave empty to use spec entry mokev
+p.   energy = 8.5;                                           % Energy (in keV), leave empty to use spec entry mokev
 p.   sample_rotation_angles = [0,0,0];                      % Offaxis ptychography correction , 3x1 vector rotation around [X,Y,beam] axes in degrees , apply a correction accounting for tilted plane oR the sample and ewald sphere curvature (high NA correction)
 
 %p.   affine_angle = 0;                                     % Not used by ptycho_recons at all. This allows you to define a variable for the affine matrix below and keep it in p for future record. This is used later by the affine_matrix_search.m script
@@ -160,7 +161,7 @@ p.   prepare.auto_center_data = false;                      % if matlab data pre
 % scan parameters for option src_positions = 'matlab_pos';
 if use_previous_position
     p.   src_positions = 'matlab_pos';                           % 'spec', 'orchestra', 'load_from_file', 'matlab_pos' (scan params are defined below) or add new position loaders to +scan/+positions/
-    p.   positions_file = init_recon_file;    %Filename pattern for position files, Example: ['../../specES1/scan_positions/scan_%05d.dat']; (the scan number will be automatically filled in)
+    p.   positions_file = '';    %Filename pattern for position files, Example: ['../../specES1/scan_positions/scan_%05d.dat']; (the scan number will be automatically filled in)
     p.   scan.type = 'custom_GPU';                                  % {'round', 'raster', 'round_roi', 'custom'}
     p.   scan.custom_positions_source = init_recon_file; % custom: a string name of a function that defines the positions; also accepts mat file with entry 'pos', see +scans/+positions/+mat_pos.m
 else
@@ -212,7 +213,7 @@ p.   raw_data_path{1} = '';                                 % Default using comp
 p.   prepare_data_path = '';                                % Default: base_path + 'analysis'. Other example: '/afs/psi.ch/project/CDI/cSAXS_project/analysis2/'; also supports %u to insert the scan number at a later point (e.g. '/afs/psi.ch/project/CDI/cSAXS_project/analysis2/S%.5u')
 p.   prepare_data_filename = [];                            % Leave empty for default file name generation, otherwise use [sprintf('S%05d_data_%03dx%03d',p.scan_number(1), p.asize(1), p.asize(2)) p.prep_data_suffix '.h5'] as default 
 p.   save_path{1} = '';                                     % Default: base_path + 'analysis'. Other example: '/afs/psi.ch/project/CDI/cSAXS_project/analysis2/'; also supports %u to insert the scan number at a later point (e.g. '/afs/psi.ch/project/CDI/cSAXS_project/analysis2/S%.5u')
-p.   io.default_mask_file = '';                             % load detector mask defined in this file instead of the mask in the detector packages, (used only if data should be prepared) 
+p.   io.default_mask_file = './preprocessing_17U/mask512.mat'; % load detector mask defined in this file instead of the mask in the detector packages, (used only if data should be prepared) 
 p.   io.default_mask_type = 'binary';                       % (used only if data should be prepared) ['binary', 'indices']. Default: 'binary' 
 p.   io.file_compression = 0;                               % reconstruction file compression for HDF5 files; 0 for no compression
 p.   io.data_compression = 3;                               % prepared data file compression for HDF5 files; 0 for no compression
